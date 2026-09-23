@@ -7,6 +7,7 @@ import numpy as np
 from episode import (OBSERVATION_SIZE, ImpactDetector, Observations,
                      likely_wall_scrape)
 from game_bridge import Sample, extract_road_view
+from route_progress import Route
 
 
 class ObservationTests(unittest.TestCase):
@@ -20,13 +21,15 @@ class ObservationTests(unittest.TestCase):
 
     def test_dark_road_does_not_blank_observation(self):
         view = np.tile(np.linspace(20, 180, 16, dtype=np.uint8), (8, 1))
-        sample = Sample({"speed": 30.0}, np.zeros(19, dtype=np.float32),
+        sample = Sample({"speed": 30.0, "x": 10.0, "z": 0.0},
+                        np.zeros(19, dtype=np.float32),
                         view, 0.0)
-        encoded = Observations(1902.0, 1400).encode(sample, 100.0, (0.0, 1.0))
+        route = Route(((0.0, 0.0), (100.0, 0.0)), (0.0, 100.0))
+        encoded = Observations(route, 1400).encode(sample, 10.0, (0.0, 1.0))
         self.assertEqual(encoded.shape, (OBSERVATION_SIZE,))
         self.assertTrue(np.isfinite(encoded).all())
-        self.assertEqual(np.count_nonzero(encoded[2:192]), 0)
-        self.assertGreater(np.ptp(encoded[192:-2]), 0.5)
+        self.assertEqual(np.count_nonzero(encoded[4:194]), 0)
+        self.assertGreater(np.ptp(encoded[194:-2]), 0.5)
 
     def test_likely_impact_requires_fast_loss_without_braking(self):
         view = np.zeros((8, 16), dtype=np.uint8)

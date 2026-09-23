@@ -33,12 +33,16 @@ def copy_transitions(source: ReplayBuffer, target: ReplayBuffer) -> None:
 
 def imitate(agent: SAC, replay: ReplayBuffer, updates: int, batch_size: int,
             seed: int) -> dict[str, float]:
-    """Fit the actor's deterministic actions to clean training-only examples."""
+    """Fit route-geometry controls first; SAC may learn visual weights later."""
     rng = np.random.default_rng(seed)
     agent.actor.train()
+    visual_slice = slice(4, -2)
+    with torch.no_grad():
+        agent.actor.net[0].weight[:, visual_slice].zero_()
     for _ in range(updates):
         indices = rng.integers(len(replay), size=batch_size)
-        state = torch.as_tensor(replay.states[indices], device=agent.device)
+        state = torch.as_tensor(replay.states[indices].copy(), device=agent.device)
+        state[:, visual_slice] = 0.0
         action = torch.as_tensor(replay.actions[indices], device=agent.device)
         mean, _ = agent.actor(state)
         steer_loss = nn.functional.mse_loss(torch.tanh(mean[:, 0]), action[:, 0])
@@ -50,6 +54,8 @@ def imitate(agent: SAC, replay: ReplayBuffer, updates: int, batch_size: int,
         loss.backward()
         agent.actor_optimizer.step()
 
+    with torch.no_grad():
+        agent.actor.net[0].weight[:, visual_slice].zero_()
     with torch.no_grad():
         steer_errors = []
         brake_correct = 0
@@ -100,7 +106,8 @@ def main() -> None:
         route_sha256=hashlib.sha256(ROUTE_CSV.read_bytes()).hexdigest(),
         observation_size=OBSERVATION_SIZE, action_size=ACTION_SIZE,
         reward_version=REWARD_VERSION, step_seconds=STEP_SECONDS,
-        source="guided route positions for training only"), indent=2),
+        source="guided route positions for training only",
+        imitation_visual_weights_masked=True), indent=2),
         encoding="utf-8")
     replay = ReplayBuffer(200_000, OBSERVATION_SIZE, ACTION_SIZE, args.seed)
     agent = SAC(OBSERVATION_SIZE, ACTION_SIZE, seed=args.seed)
@@ -115,8 +122,7 @@ def main() -> None:
             config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
             runner = EpisodeRunner(game, route)
             for index in range(args.guide_attempts):
-                if index:
-                    game.reset()
+                game.reset()  # start the game clock immediately before driving
                 trial = ReplayBuffer(10_000, OBSERVATION_SIZE, ACTION_SIZE,
                                      args.seed + index)
                 guide = RouteGuide(route, speed_cap=args.speed_cap,
@@ -147,10 +153,7 @@ def main() -> None:
             replay.save(run / "replay.npz")
             print(f"Imitation: {metrics}", flush=True)
             for index in range(args.actor_attempts):
-                if index:
-                    game.reset()
-                else:
-                    game.ensure_start()
+                game.reset()  # fitting may have left the clock running at start
                 result = runner.run(DeterministicActor(agent), max_seconds=args.seconds)
                 record = result.as_json() | dict(policy="imitated_actor")
                 if result.finished:
@@ -159,7 +162,7 @@ def main() -> None:
                 with (run / "episodes.jsonl").open("a", encoding="utf-8") as file:
                     file.write(json.dumps(record) + "\n")
                 print(f"Actor {index + 1}: {record}", flush=True)
-            game.reset()
+                game.reset()
     finally:
         if len(replay):
             replay.save(run / "replay.npz")

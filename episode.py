@@ -10,30 +10,34 @@ import time
 import numpy as np
 
 from game_bridge import GameBridge, Sample
+from guide import RouteGeometry
 from route_progress import ProgressTracker, Route
 
 
 ROOT = Path(__file__).resolve().parent
 ROUTE_CSV = ROOT / "data" / "route-20260923T131307Z" / "positions.csv"
-OBSERVATION_SIZE = 1 + 1 + 10 * 19 + 8 * 16 + 2
+OBSERVATION_SIZE = 1 + 1 + 2 + 10 * 19 + 8 * 16 + 2
 ACTION_SIZE = 2
 STEP_SECONDS = 0.02
 
 
 class Observations:
-    """[speed, route progress, 10 recent LIDAR vectors, road view, previous action].
+    """[speed, progress, route angle/offset, rays, road view, last action].
 
-    Speed is divided by 300, pixel ray indices by game width, the 16x8
-    grayscale road view by 255, and progress by route length. All values are
-    float32. History is reset at every episode.
+    Speed is divided by 100, target angle by pi, signed route offset by 20,
+    pixel ray indices by game width, road view by 255, and progress by route
+    length. All values are float32. History is reset at every episode.
     """
 
-    def __init__(self, route_length: float, game_width: int):
-        self.route_length = route_length
+    def __init__(self, route: Route, game_width: int):
+        self.route = route
         self.game_width = game_width
         self.rays = deque(maxlen=10)
+        self.geometry = RouteGeometry(route)
 
     def encode(self, sample: Sample, progress: float, previous_action) -> np.ndarray:
+        self.geometry.observe(sample, progress)
+        target_angle, signed_offset = self.geometry.features()
         rays = np.clip(sample.lidar / self.game_width, 0.0, 1.0).astype(np.float32)
         if not self.rays:
             self.rays.extend([rays.copy() for _ in range(10)])
@@ -43,8 +47,10 @@ class Observations:
         if road_view.shape != (8, 16):
             raise RuntimeError("Bad road-view shape")
         result = np.concatenate((
-            np.array([np.clip(sample.telemetry["speed"] / 300.0, 0.0, 1.0),
-                      np.clip(progress / self.route_length, 0.0, 1.0)], dtype=np.float32),
+            np.array([np.clip(sample.telemetry["speed"] / 100.0, 0.0, 3.0),
+                      np.clip(progress / self.route.length, 0.0, 1.0),
+                      np.clip(target_angle / np.pi, -1.0, 1.0),
+                      np.clip(signed_offset / 20.0, -1.0, 1.0)], dtype=np.float32),
             np.array(self.rays, dtype=np.float32).reshape(-1),
             (road_view / 255.0).reshape(-1),
             np.asarray(previous_action, dtype=np.float32),
@@ -132,7 +138,7 @@ class EpisodeRunner:
         first = tracker.update(initial.telemetry["x"], initial.telemetry["z"])
         if not first.accepted:
             raise RuntimeError(f"Invalid initial route position: {first.reason}")
-        encoder = Observations(self.route.length, self.game.frame_shape[1])
+        encoder = Observations(self.route, self.game.frame_shape[1])
         state = encoder.encode(initial, first.current, (0.0, 0.0))
         if hasattr(policy, "observe"):
             policy.observe(initial, first.current)

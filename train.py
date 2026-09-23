@@ -17,7 +17,7 @@ from sac import SAC
 
 
 ROOT = Path(__file__).resolve().parent
-REWARD_VERSION = "wall-scrape-v7-dxgi"
+REWARD_VERSION = "wall-scrape-v8-route-geometry"
 
 
 def main():
@@ -139,13 +139,13 @@ def main():
                                                  encoding="utf-8")
             runner = EpisodeRunner(game, route)
             for index in range(start_index, start_index + args.episodes):
-                if index > start_index:
-                    game.reset()
+                game.reset()  # zero the game clock just before each attempt
                 using_agent = total_steps >= args.warmup_steps and len(replay) >= args.batch_size
                 policy = agent if using_agent else explorer
                 print(f"Attempt {index + 1}/{start_index + args.episodes}: "
                       f"{'SAC actor' if using_agent else 'exploratory driver'}", flush=True)
                 result = runner.run(policy, buffer=replay, max_seconds=args.seconds)
+                game.reset()  # leave the finish screen before offline updates
                 total_steps += result.steps
                 record = result.as_json() | dict(episode=index + 1, total_steps=total_steps,
                                                  policy="sac" if using_agent else "explore")
@@ -165,7 +165,6 @@ def main():
                     print(f"  {count} SAC updates; {last_metrics}", flush=True)
                 agent.save(run / "checkpoint.pt")
                 replay.save(run / "replay.npz")
-            game.reset()
     finally:
         # Keep the latest recoverable model and transitions if a later episode fails.
         agent.save(run / "checkpoint.pt")

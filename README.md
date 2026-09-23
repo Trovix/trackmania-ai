@@ -1,8 +1,8 @@
 # Trackmania AI
 
-Can an AI beat my **34.094-second** time on a Trackmania 2020 test map? That was my best after 15 minutes of practice. The agent uses Openplanet telemetry, screen-derived road distances, a small road image and a virtual gamepad. It learns with PyTorch Soft Actor-Critic. A separate lookahead driver uses my recorded position route to produce training examples; no human control inputs were recorded.
+Can an AI beat my **34.094-second** time on a Trackmania 2020 test map? That was my best after 15 minutes of practice. A PyTorch actor steers from Openplanet telemetry; a route-following driver supplied training examples without recorded human controls. Screen images and road-distance rays are collected, but the current imitated actor starts with their weights masked. SAC is implemented but has not improved this result.
 
-The latest 10-second fullscreen check ran at about 47 fresh image/input updates per second. The route-guided driver has completed the map, but **the learned actor has not finished a lap yet**.
+The learned steering actor, with a speed governor, has finished in **46.332 seconds** officially without detected wall scraping. A 44.114-second finish included wall scraping. Neither beats the human benchmark; these are development runs, not a final 20-attempt evaluation.
 
 ## Run it
 
@@ -20,7 +20,7 @@ With the game foreground, fully visible on one monitor, and the car at the start
 .\.venv\Scripts\python.exe bootstrap.py --guide-attempts 1 --actor-attempts 1 --seconds 90
 ```
 
-`bootstrap.py` keeps only complete guided laps without detected wall scrapes, fits the actor to their observations and actions, then tests it without route-guide actions. The actor still receives route progress as one observation. Once it can drive useful laps, continue learning with:
+`bootstrap.py` keeps only complete guided laps without detected wall scrapes, fits the actor to their observations and actions, then tests it without route-guide actions. The actor receives route progress, heading error and offset derived from telemetry. Imitation initially masks the image features so changing stadium graphics cannot steer the car. `relabel_trace.py` can fit it again on guide corrections from a failed actor trace. SAC is experimental; to start it from the guided examples:
 
 ```powershell
 .\.venv\Scripts\python.exe train.py --bootstrap-run .\runs\bootstrap-YYYYMMDDTHHMMSSZ --episodes 10 --seconds 90 --warmup-steps 2000

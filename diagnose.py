@@ -26,6 +26,26 @@ class DeterministicActor:
         return self.agent.act(observation, deterministic=True)
 
 
+class SpeedGovernedActor:
+    """Ablation: keep learned steering, override drive with a speed limit."""
+
+    def __init__(self, actor: DeterministicActor, speed_cap: float,
+                 route_length: float, slow_zones=()):
+        self.actor = actor
+        self.speed_cap = speed_cap
+        self.route_length = route_length
+        self.slow_zones = slow_zones
+
+    def act(self, observation):
+        action = self.actor.act(observation).copy()
+        cap = self.speed_cap
+        for start, end, zone_cap in self.slow_zones:
+            if start <= observation[1] * self.route_length <= end:
+                cap = min(cap, zone_cap)
+        action[1] = -1.0 if observation[0] * 100.0 > cap else 1.0
+        return action
+
+
 class DiagnosticObserver:
     def __init__(self, game, directory):
         self.game = game
@@ -93,25 +113,52 @@ def main():
                         help="use training-only route guidance")
     parser.add_argument("--speed-cap", type=float, default=35.0)
     parser.add_argument("--lookahead-seconds", type=float, default=0.5)
+    parser.add_argument("--actor-speed-cap", type=float,
+                        help="diagnose steering with a fixed speed governor")
+    parser.add_argument("--actor-slow-zone", type=str, action="append", default=[],
+                        help="repeatable START:END:CAP route-distance speed limit")
     args = parser.parse_args()
     if not 1 <= args.seconds <= 120:
         parser.error("seconds must be in [1, 120]")
     if args.checkpoint and args.guide:
         parser.error("choose a checkpoint or the route guide")
+    if args.actor_speed_cap is not None and (not args.checkpoint or args.actor_speed_cap <= 0):
+        parser.error("actor-speed-cap requires a checkpoint and positive speed")
+    slow_zones = []
+    for zone_text in args.actor_slow_zone:
+        if args.actor_speed_cap is None:
+            parser.error("actor-slow-zone requires actor-speed-cap")
+        try:
+            zone = tuple(float(part) for part in zone_text.split(":"))
+        except ValueError:
+            parser.error("actor-slow-zone must be START:END:CAP")
+        if len(zone) != 3 or not 0 <= zone[0] < zone[1] or zone[2] <= 0:
+            parser.error("invalid actor-slow-zone bounds or speed")
+        slow_zones.append(zone)
     route = Route.from_csv(ROUTE_CSV)
     directory = (Path(__file__).resolve().parent / "runs" /
                  datetime.now(timezone.utc).strftime("diagnose-%Y%m%dT%H%M%SZ"))
     directory.mkdir(parents=True, exist_ok=False)
+    (directory / "config.json").write_text(json.dumps(
+        vars(args) | {"checkpoint": str(args.checkpoint) if args.checkpoint else None},
+        indent=2), encoding="utf-8")
     with GameBridge() as game:
         observer = DiagnosticObserver(game, directory)
         try:
+            game.ensure_start()
+            game.reset()
             policy = (DeterministicActor(args.checkpoint) if args.checkpoint else
                       RouteGuide(route, speed_cap=args.speed_cap,
                                  lookahead_seconds=args.lookahead_seconds)
                       if args.guide else ExploratoryDriver(args.seed))
+            if args.actor_speed_cap is not None:
+                policy = SpeedGovernedActor(policy, args.actor_speed_cap,
+                                            route.length, slow_zones)
             result = EpisodeRunner(game, route).run(policy,
                                                      max_seconds=args.seconds,
                                                      observer=observer)
+            if result.finished:
+                cv2.imwrite(str(directory / "finish.jpg"), game.window.screenshot())
             (directory / "result.json").write_text(json.dumps(result.as_json(), indent=2),
                                                     encoding="utf-8")
             print(result.as_json(), flush=True)
