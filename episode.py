@@ -134,6 +134,8 @@ class EpisodeRunner:
             raise RuntimeError(f"Invalid initial route position: {first.reason}")
         encoder = Observations(self.route.length, self.game.frame_shape[1])
         state = encoder.encode(initial, first.current, (0.0, 0.0))
+        if hasattr(policy, "observe"):
+            policy.observe(initial, first.current)
         start = time.monotonic()
         last_progress_time = start
         tick = start
@@ -178,6 +180,8 @@ class EpisodeRunner:
                 if not update.accepted and update.reason != "outside_corridor":
                     raise RuntimeError(f"Invalid route projection: {update.reason}")
                 next_state = encoder.encode(sample, update.current, action)
+                if hasattr(policy, "observe") and update.accepted:
+                    policy.observe(sample, update.current)
                 elapsed = time.monotonic() - start
                 finished = sample.telemetry["finished"] > 0.5
                 no_progress = elapsed > 4.0 and update.gained < 0.05

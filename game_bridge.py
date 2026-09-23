@@ -243,7 +243,10 @@ class GameBridge:
             if self.at_start(self.telemetry.latest()):
                 time.sleep(0.25)
                 return
-        raise TimeoutError("Reset did not return the car to Aimap's start")
+        data = self.telemetry.latest()
+        if data["x"] == 0.0 and data["z"] == 0.0:
+            raise RuntimeError("Trackmania left driving mode; return to the test-map start")
+        raise TimeoutError("Reset did not return the car to the test-map start")
 
     def close(self):
         try:

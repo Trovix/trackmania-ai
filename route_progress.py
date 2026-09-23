@@ -21,6 +21,17 @@ class Route:
     def length(self) -> float:
         return self.distances[-1]
 
+    def point_at(self, distance: float) -> tuple[float, float]:
+        """Interpolate a position at a distance along the recorded route."""
+        distance = max(0.0, min(distance, self.length))
+        index = min(bisect_right(self.distances, distance) - 1,
+                    len(self.points) - 2)
+        fraction = ((distance - self.distances[index]) /
+                    (self.distances[index + 1] - self.distances[index]))
+        start, end = self.points[index], self.points[index + 1]
+        return (start[0] + fraction * (end[0] - start[0]),
+                start[1] + fraction * (end[1] - start[1]))
+
     @classmethod
     def from_csv(cls, path: str | Path, spacing: float = 2.0) -> "Route":
         """Discard stationary samples and interpolate points at even distances."""

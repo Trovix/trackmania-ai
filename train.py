@@ -31,7 +31,11 @@ def main():
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--resume-run", type=Path,
                         help="continue this run for --episodes additional attempts")
+    parser.add_argument("--bootstrap-run", type=Path,
+                        help="start a new SAC run from clean guided examples and actor")
     args = parser.parse_args()
+    if args.resume_run and args.bootstrap_run:
+        parser.error("choose a resumed run or a bootstrap source")
     if not 1 <= args.episodes <= 500 or not 1 <= args.seconds <= 120:
         parser.error("episodes must be 1-500 and seconds must be 1-120")
     if args.warmup_steps < args.batch_size or args.batch_size < 2:
@@ -75,20 +79,45 @@ def main():
                                        interrupted_steps=interrupted_steps,
                                        additional_episodes=args.episodes)) + "\n")
     else:
+        source = args.bootstrap_run.resolve() if args.bootstrap_run else None
+        if source:
+            source_config = json.loads((source / "config.json").read_text(
+                encoding="utf-8"))
+            if (source_config["map_sha256"] != map_hash or
+                    source_config["route_sha256"] != route_hash or
+                    source_config["observation_size"] != OBSERVATION_SIZE or
+                    source_config["action_size"] != ACTION_SIZE or
+                    source_config.get("reward_version", REWARD_VERSION) != REWARD_VERSION):
+                raise RuntimeError("Bootstrap source does not match this experiment")
         label = datetime.now(timezone.utc).strftime("train-%Y%m%dT%H%M%SZ")
         run = ROOT / "runs" / label
         run.mkdir(parents=True, exist_ok=False)
-        config = {key: value for key, value in vars(args).items() if key != "resume_run"}
+        config = {key: value for key, value in vars(args).items()
+                  if key not in ("resume_run", "bootstrap_run")}
         config.update(map_sha256=map_hash, route_sha256=route_hash,
                       reward_version=REWARD_VERSION,
                       step_seconds=STEP_SECONDS,
                       observation_size=OBSERVATION_SIZE, action_size=ACTION_SIZE,
-                      torch=torch.__version__)
+                      torch=torch.__version__,
+                      bootstrap_run=str(source) if source else None)
         (run / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
-        replay = ReplayBuffer(200_000, OBSERVATION_SIZE, ACTION_SIZE, args.seed)
-        agent = SAC(OBSERVATION_SIZE, ACTION_SIZE, device=args.device, seed=args.seed)
+        if source:
+            replay = ReplayBuffer.load(source / "replay.npz")
+            agent = SAC.load(source / "checkpoint.pt", device=args.device)
+            # Imitation fits deterministic action means. Start SAC near those
+            # actions instead of sampling from its still-untrained variance head.
+            with torch.no_grad():
+                output = agent.actor.net[-1]
+                output.weight[ACTION_SIZE:].zero_()
+                output.bias[ACTION_SIZE:].fill_(-2.0)
+            config["bootstrap_examples"] = len(replay)
+            config["bootstrap_log_std"] = -2.0
+        else:
+            replay = ReplayBuffer(200_000, OBSERVATION_SIZE, ACTION_SIZE, args.seed)
+            agent = SAC(OBSERVATION_SIZE, ACTION_SIZE, device=args.device,
+                        seed=args.seed)
         explorer = ExploratoryDriver(args.seed)
-        start_index, total_steps = 0, 0
+        start_index, total_steps = 0, len(replay)
     try:
         with GameBridge() as game:
             if args.resume_run:
@@ -104,6 +133,8 @@ def main():
             else:
                 config.update(capture_source_size=source_size,
                               capture_output_size=output_size)
+                if source and source_config.get("capture_output_size") not in (None, output_size):
+                    raise RuntimeError("Bootstrap capture dimensions differ from this run")
                 (run / "config.json").write_text(json.dumps(config, indent=2),
                                                  encoding="utf-8")
             runner = EpisodeRunner(game, route)

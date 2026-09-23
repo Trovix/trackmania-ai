@@ -11,6 +11,7 @@ import numpy as np
 
 from episode import EpisodeRunner, ExploratoryDriver, OBSERVATION_SIZE, ROUTE_CSV
 from game_bridge import GameBridge
+from guide import RouteGuide
 from route_progress import Route
 from sac import SAC
 
@@ -88,9 +89,15 @@ def main():
     parser.add_argument("--seconds", type=float, default=25.0)
     parser.add_argument("--checkpoint", type=Path,
                         help="drive with a saved actor instead of random exploration")
+    parser.add_argument("--guide", action="store_true",
+                        help="use training-only route guidance")
+    parser.add_argument("--speed-cap", type=float, default=35.0)
+    parser.add_argument("--lookahead-seconds", type=float, default=0.5)
     args = parser.parse_args()
-    if not 1 <= args.seconds <= 60:
-        parser.error("seconds must be in [1, 60]")
+    if not 1 <= args.seconds <= 120:
+        parser.error("seconds must be in [1, 120]")
+    if args.checkpoint and args.guide:
+        parser.error("choose a checkpoint or the route guide")
     route = Route.from_csv(ROUTE_CSV)
     directory = (Path(__file__).resolve().parent / "runs" /
                  datetime.now(timezone.utc).strftime("diagnose-%Y%m%dT%H%M%SZ"))
@@ -98,8 +105,10 @@ def main():
     with GameBridge() as game:
         observer = DiagnosticObserver(game, directory)
         try:
-            policy = (DeterministicActor(args.checkpoint) if args.checkpoint
-                      else ExploratoryDriver(args.seed))
+            policy = (DeterministicActor(args.checkpoint) if args.checkpoint else
+                      RouteGuide(route, speed_cap=args.speed_cap,
+                                 lookahead_seconds=args.lookahead_seconds)
+                      if args.guide else ExploratoryDriver(args.seed))
             result = EpisodeRunner(game, route).run(policy,
                                                      max_seconds=args.seconds,
                                                      observer=observer)
