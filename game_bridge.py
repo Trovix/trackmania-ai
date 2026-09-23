@@ -1,4 +1,4 @@
-"""Small, local Trackmania bridge for the Aimap experiment.
+"""Small, local Trackmania bridge for the test-map experiment.
 
 Uses the existing Openplanet telemetry plugin, TMRL's screenshot-derived LIDAR,
 and the installed virtual gamepad. It never moves or focuses the game window.
@@ -15,12 +15,15 @@ import select
 import socket
 import time
 
+import cv2
+import dxcam
 import numpy as np
 import vgamepad
+import win32api
+import win32con
 import win32gui
 from tmrl.custom.tm.utils.control_keyboard import DEL, PressKey, ReleaseKey
 from tmrl.custom.tm.utils.tools import Lidar
-from tmrl.custom.tm.utils.window import WindowInterface
 
 from probe import FIELDS, PACKET
 
@@ -32,6 +35,65 @@ MAP = Path(os.environ.get("TRACKMANIA_MAP_PATH",
 FROZEN_MAP = ROOT / "data" / "Aimap.Map.Gbx"
 EXPECTED_MAP_SHA256 = "1477f55a124739f26b9d7a9b16633e6ffd3eb93deebc02fa7c7ab0e2c8e1e6c3"
 START = (400.0, 368.0)
+CAPTURE_WIDTH = 960
+
+
+class ScaledWindowCapture:
+    """Capture fresh rendered frames from the primary display, then resize."""
+
+    def __init__(self, hwnd: int):
+        self.hwnd = hwnd
+        rect = win32gui.GetClientRect(hwnd)
+        self.source_size = (rect[2], rect[3])
+        if min(self.source_size) < 100:
+            raise RuntimeError("Game client area is too small to capture")
+        width = min(CAPTURE_WIDTH, self.source_size[0])
+        height = round(width * self.source_size[1] / self.source_size[0])
+        self.output_size = (width, height)
+        self.camera = dxcam.create(output_idx=0, output_color="BGR")
+
+    def screenshot(self) -> np.ndarray:
+        left, top, right, bottom = win32gui.GetWindowRect(self.hwnd)
+        monitor = win32api.GetMonitorInfo(
+            win32api.MonitorFromWindow(self.hwnd, win32con.MONITOR_DEFAULTTONEAREST))
+        monitor_left, monitor_top, monitor_right, monitor_bottom = monitor["Monitor"]
+        if (left < monitor_left or top < monitor_top or
+                right > monitor_right or bottom > monitor_bottom):
+            raise RuntimeError("Trackmania must fit entirely on one monitor "
+                               "for reliable image capture")
+        if (not monitor["Flags"] & 1 or
+                (monitor_right - monitor_left, monitor_bottom - monitor_top) !=
+                (self.camera.width, self.camera.height)):
+            raise RuntimeError("Trackmania must be on the primary display")
+        rect = win32gui.GetClientRect(self.hwnd)
+        if (rect[2], rect[3]) != self.source_size:
+            raise RuntimeError(f"Game window size changed from {self.source_size} "
+                               f"to {(rect[2], rect[3])}")
+        client_left, client_top = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        region = (client_left - monitor_left, client_top - monitor_top,
+                  client_left - monitor_left + self.source_size[0],
+                  client_top - monitor_top + self.source_size[1])
+        deadline = time.monotonic() + 0.1
+        frame = self.camera.grab(region=region, new_frame_only=True)
+        while frame is None and time.monotonic() < deadline:
+            time.sleep(0.002)
+            frame = self.camera.grab(region=region, new_frame_only=True)
+        if frame is None:
+            raise TimeoutError("No newly rendered Trackmania frame")
+        return cv2.resize(frame, self.output_size, interpolation=cv2.INTER_AREA)
+
+    def close(self):
+        self.camera.release()
+
+
+def extract_road_view(frame: np.ndarray) -> np.ndarray:
+    """Cheap, lightly averaged 16x8 view of the lower road scene."""
+    height, width = frame.shape[:2]
+    road = frame[int(height * 0.40):int(height * 0.85),
+                 int(width * 0.05):int(width * 0.95)]
+    coarse = cv2.resize(road, (64, 32), interpolation=cv2.INTER_LINEAR)
+    small = cv2.resize(coarse, (16, 8), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
 
 def check_map() -> str:
@@ -82,6 +144,7 @@ class Telemetry:
 class Sample:
     telemetry: dict[str, float]
     lidar: np.ndarray
+    road_view: np.ndarray
     timestamp: float
 
 
@@ -93,12 +156,20 @@ class GameBridge:
         if not self.hwnd:
             raise RuntimeError("Trackmania window not found")
         self.check_focus()
-        self.window = WindowInterface("Trackmania")
-        self.telemetry = Telemetry()
-        self.pad = vgamepad.VX360Gamepad()
-        self.lidar = None
-        self.frame_shape = None
-        self.release()
+        self.window = ScaledWindowCapture(self.hwnd)
+        try:
+            self.telemetry = Telemetry()
+            try:
+                self.pad = vgamepad.VX360Gamepad()
+                self.lidar = None
+                self.frame_shape = None
+                self.release()
+            except BaseException:
+                self.telemetry.close()
+                raise
+        except BaseException:
+            self.window.close()
+            raise
 
     def check_focus(self):
         if (win32gui.IsIconic(self.hwnd) or
@@ -110,23 +181,26 @@ class GameBridge:
         self.pad.update()
 
     def apply(self, steering: float, drive: float):
-        """Steering is continuous; drive selects full gas, coast or full brake.
+        """Steering is continuous; drive selects full gas or full brake.
 
         Half trigger did not register as gas in the earlier game probe, so the
-        initial policy uses a documented three-way drive mapping.
+        policy defaults to gas and brakes only on a strong negative request.
         """
         self.check_focus()
         if not all(math.isfinite(value) and -1 <= value <= 1
                    for value in (steering, drive)):
             raise ValueError("actions must be finite and within [-1, 1]")
-        self.pad.right_trigger_float(1.0 if drive > 0.2 else 0.0)
-        self.pad.left_trigger_float(1.0 if drive < -0.2 else 0.0)
+        braking = drive < -0.5
+        self.pad.right_trigger_float(0.0 if braking else 1.0)
+        self.pad.left_trigger_float(1.0 if braking else 0.0)
         self.pad.left_joystick_float(steering, 0.0)
         self.pad.update()
 
     def sample(self) -> Sample:
         self.check_focus()
-        frame = self.window.screenshot()[:, :, :3]
+        started = time.perf_counter()
+        frame = self.window.screenshot()
+        captured = time.perf_counter()
         shape = frame.shape
         if self.frame_shape is None:
             self.frame_shape = shape
@@ -136,8 +210,14 @@ class GameBridge:
         elif shape != self.frame_shape:
             raise RuntimeError("Game window size changed during a run")
         rays = self.lidar.lidar_20(frame, show=False)
+        ranged = time.perf_counter()
+        road_view = extract_road_view(frame)
+        viewed = time.perf_counter()
         data = self.telemetry.latest()
-        return Sample(data, rays, time.monotonic())
+        received = time.perf_counter()
+        self.last_sample_timing = (captured - started, ranged - captured,
+                                   viewed - ranged, received - viewed)
+        return Sample(data, rays, road_view, time.monotonic())
 
     def at_start(self, data: dict[str, float]) -> bool:
         return (math.hypot(data["x"] - START[0], data["z"] - START[1]) < 2
@@ -169,7 +249,10 @@ class GameBridge:
         try:
             self.release()
         finally:
-            self.telemetry.close()
+            try:
+                self.telemetry.close()
+            finally:
+                self.window.close()
 
     def __enter__(self):
         return self

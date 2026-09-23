@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 
 from episode import (ACTION_SIZE, OBSERVATION_SIZE, EpisodeRunner,
-                     ExploratoryDriver, ROUTE_CSV)
+                     ExploratoryDriver, ROUTE_CSV, STEP_SECONDS)
 from game_bridge import GameBridge, check_map
 from replay import ReplayBuffer
 from route_progress import Route
@@ -17,6 +17,7 @@ from sac import SAC
 
 
 ROOT = Path(__file__).resolve().parent
+REWARD_VERSION = "wall-scrape-v7-dxgi"
 
 
 def main():
@@ -48,6 +49,8 @@ def main():
         config = json.loads((run / "config.json").read_text(encoding="utf-8"))
         if (config["map_sha256"] != map_hash or
                 config["route_sha256"] != route_hash or
+                config.get("reward_version") != REWARD_VERSION or
+                config.get("step_seconds") != STEP_SECONDS or
                 config["observation_size"] != OBSERVATION_SIZE or
                 config["action_size"] != ACTION_SIZE):
             raise RuntimeError("Run does not match the frozen map, route or observation contract")
@@ -58,13 +61,18 @@ def main():
         agent = SAC.load(run / "checkpoint.pt", device=args.device)
         history = (run / "episodes.jsonl").read_text(encoding="utf-8").splitlines()
         last = json.loads(history[-1])
-        start_index, total_steps = last["episode"], last["total_steps"]
-        if len(replay) < total_steps and total_steps < replay.capacity:
+        start_index, logged_steps = last["episode"], last["total_steps"]
+        if len(replay) < logged_steps and logged_steps < replay.capacity:
             raise RuntimeError("Replay snapshot is older than the episode log")
+        # A live interruption can leave valid transitions from an unfinished
+        # attempt in the replay snapshot but no corresponding episode record.
+        interrupted_steps = max(0, len(replay) - logged_steps)
+        total_steps = logged_steps + interrupted_steps
         explorer = ExploratoryDriver(args.seed + start_index)
         with (run / "resumes.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps(dict(started_utc=datetime.now(timezone.utc).isoformat(),
                                        from_episode=start_index,
+                                       interrupted_steps=interrupted_steps,
                                        additional_episodes=args.episodes)) + "\n")
     else:
         label = datetime.now(timezone.utc).strftime("train-%Y%m%dT%H%M%SZ")
@@ -72,6 +80,8 @@ def main():
         run.mkdir(parents=True, exist_ok=False)
         config = {key: value for key, value in vars(args).items() if key != "resume_run"}
         config.update(map_sha256=map_hash, route_sha256=route_hash,
+                      reward_version=REWARD_VERSION,
+                      step_seconds=STEP_SECONDS,
                       observation_size=OBSERVATION_SIZE, action_size=ACTION_SIZE,
                       torch=torch.__version__)
         (run / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -81,6 +91,21 @@ def main():
         start_index, total_steps = 0, 0
     try:
         with GameBridge() as game:
+            if args.resume_run:
+                game.reset()
+            game.ensure_start()
+            game.sample()
+            source_size = list(game.window.source_size)
+            output_size = list(game.window.output_size)
+            if args.resume_run:
+                if (config.get("capture_source_size") != source_size or
+                        config.get("capture_output_size") != output_size):
+                    raise RuntimeError("Capture dimensions differ from the saved run")
+            else:
+                config.update(capture_source_size=source_size,
+                              capture_output_size=output_size)
+                (run / "config.json").write_text(json.dumps(config, indent=2),
+                                                 encoding="utf-8")
             runner = EpisodeRunner(game, route)
             for index in range(start_index, start_index + args.episodes):
                 if index > start_index:

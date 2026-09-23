@@ -1,6 +1,7 @@
 """Small Soft Actor-Critic learner for two continuous policy outputs."""
 
 from copy import deepcopy
+import math
 from pathlib import Path
 
 import numpy as np
@@ -62,7 +63,8 @@ class SAC:
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
         self.critic_optimizer = torch.optim.Adam(
             list(self.critic1.parameters()) + list(self.critic2.parameters()), lr=3e-4)
-        self.log_alpha = torch.zeros((), device=self.device, requires_grad=True)
+        self.log_alpha = torch.tensor(math.log(0.01), device=self.device,
+                                      requires_grad=True)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=3e-4)
         self.target_entropy = -float(action_size)
         self.gamma = gamma

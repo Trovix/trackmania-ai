@@ -111,7 +111,7 @@ class ProgressTracker:
     """
 
     def __init__(self, route: Route, *, search_window: float = 25.0,
-                 corridor: float = 20.0, max_step: float = 12.0):
+                 corridor: float = 30.0, max_step: float = 12.0):
         if not all(isfinite(v) and v > 0 for v in
                    (search_window, corridor, max_step)):
             raise ValueError("limits must be positive and finite")
