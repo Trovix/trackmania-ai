@@ -1,0 +1,5 @@
+.venv/
+tools/
+__pycache__/
+runs/
+data/*.Gbx
