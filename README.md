@@ -2,7 +2,7 @@
 
 Can an AI beat my **34.094-second** time on a Trackmania 2020 test map? That was my best after 15 minutes of practice. The agent uses Openplanet telemetry, screen-derived road distances and a virtual gamepad. It learns with PyTorch Soft Actor-Critic; the recorded route supplies progress rewards, not human driving inputs.
 
-The game connection and training loop work, but **the AI has not finished a lap yet**. The learner was built with agentic coding help.
+The game connection and training loop work, but **the AI has not finished a lap yet**. 
 
 ## Run it
 
